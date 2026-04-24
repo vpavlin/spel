@@ -694,3 +694,17 @@ fn test_no_pda_no_helpers() {
         "should not generate fetch helpers when no PDAs"
     );
 }
+
+#[test]
+fn test_ffi_has_catch_unwind() {
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+
+    // FFI code should include catch_unwind wrapping
+    assert!(output.ffi_code.contains("catch_unwind"), "should contain catch_unwind: {}", output.ffi_code);
+    assert!(output.ffi_code.contains("ffi_call(move || my_multisig_create_impl(args))"), "should use ffi_call for create: {}", output.ffi_code);
+    assert!(output.ffi_code.contains("internal panic in FFI"), "should have panic error message");
+    assert!(output.ffi_code.contains("UnwindSafe"), "should import UnwindSafe");
+
+    // Verify the helper function signature
+    assert!(output.ffi_code.contains("fn ffi_call(f: impl FnOnce() -> Result<String, String> + UnwindSafe)"), "ffi_call signature");
+}
