@@ -277,7 +277,13 @@ fn generate_idl_inner(
         local_items.extend(items.iter().cloned());
         match external_enum_variants(enum_path, &local_items, dep_source_dirs) {
             Some(variants) => {
-                instructions = order_by_enum_variants(instructions, &variants, enum_path)?;
+                instructions = order_by_enum_variants(
+                    instructions,
+                    |ix| ix.fn_name.to_string(),
+                    &variants,
+                    enum_path,
+                )
+                .map_err(IdlGenError::InstructionEnumMismatch)?;
             },
             None => warn(format!(
                 "`{enum_path}` not found in the program source or its local \
@@ -369,7 +375,7 @@ fn generate_idl_inner(
 /// declaration order. A path starting with a local dependency's crate name is
 /// looked up in that crate; a bare or `crate`/`self`/`super` path in
 /// `local_items`. `None` when the enum cannot be found.
-fn external_enum_variants(
+pub fn external_enum_variants(
     enum_path: &str,
     local_items: &[syn::Item],
     dep_source_dirs: &[PathBuf],
@@ -428,30 +434,33 @@ fn find_enum<'a>(items: &'a [syn::Item], name: &str) -> Option<&'a syn::ItemEnum
 }
 
 /// Reorder `instructions` to follow `variants`. Each variant must have exactly
-/// one instruction whose PascalCase name matches it, as the `#[lez_program]`
-/// dispatch does.
-fn order_by_enum_variants(
-    mut instructions: Vec<InstructionInfo>,
+/// one instruction whose PascalCase `fn_name` matches it, as the
+/// `#[lez_program]` dispatch does.
+///
+/// # Errors
+///
+/// A variant without an instruction, or an instruction without a variant.
+pub fn order_by_enum_variants<T>(
+    mut instructions: Vec<T>,
+    fn_name: impl Fn(&T) -> String,
     variants: &[String],
     enum_path: &str,
-) -> Result<Vec<InstructionInfo>, IdlGenError> {
+) -> Result<Vec<T>, String> {
     let mut ordered = Vec::with_capacity(instructions.len());
     for variant in variants {
         let pos = instructions
             .iter()
-            .position(|ix| to_pascal_case(&ix.fn_name.to_string()) == *variant)
+            .position(|ix| to_pascal_case(&fn_name(ix)) == *variant)
             .ok_or_else(|| {
-                IdlGenError::InstructionEnumMismatch(format!(
-                    "variant `{variant}` of `{enum_path}` has no #[instruction] function"
-                ))
+                format!("variant `{variant}` of `{enum_path}` has no #[instruction] function")
             })?;
         ordered.push(instructions.remove(pos));
     }
     if let Some(ix) = instructions.first() {
-        return Err(IdlGenError::InstructionEnumMismatch(format!(
+        return Err(format!(
             "#[instruction] `{}` has no variant in `{enum_path}`",
-            ix.fn_name
-        )));
+            fn_name(ix)
+        ));
     }
     Ok(ordered)
 }

@@ -456,6 +456,9 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         segments.join("::")
     });
 
+    // The guest file's own items, kept to look up an external instruction enum.
+    let mut local_items: Vec<syn::Item> = Vec::new();
+
     // Collect #[account_type] annotated types from the source file's top-level items.
     // Expands the candidate set to cover common Rust module/bin layouts and verifies
     // that the candidate file actually defines the target module, avoiding false matches.
@@ -548,6 +551,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                                     }
                                 }
                             }
+                            local_items = all_items.clone();
                             // Also include items from path-dependency crates, so types defined in
                             // extension libraries (account types, instruction-arg types) reach the IDL.
                             let (extra_items, _) =
@@ -583,16 +587,22 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         result
     };
 
+    let idl_instructions = idl_instruction_order(
+        &instructions,
+        ext_instr_str.as_deref(),
+        &local_items,
+        &deps.graph.transitive_dirs,
+    )?;
     let idl_fn = generate_idl_fn(
         mod_name,
-        &instructions,
+        &idl_instructions,
         ext_instr_str.as_deref(),
         accounts.clone(),
         types.clone(),
     );
     let idl_json = generate_idl_json(
         mod_name,
-        &instructions,
+        &idl_instructions,
         ext_instr_str.as_deref(),
         accounts,
         types,
@@ -1629,6 +1639,34 @@ fn rust_type_to_idl_json(ty: &Type) -> String {
     }
 }
 
+/// The instructions in the order the IDL lists them. Clients encode an
+/// instruction's IDL position as its Borsh variant tag, so with an external
+/// enum this is the enum's variant order; otherwise source order, which the
+/// generated enum follows. Source order also when the enum cannot be found.
+fn idl_instruction_order<'a>(
+    instructions: &'a [InstructionInfo],
+    external_instruction: Option<&str>,
+    local_items: &[syn::Item],
+    dep_dirs: &[std::path::PathBuf],
+) -> syn::Result<Vec<&'a InstructionInfo>> {
+    let in_source_order: Vec<&InstructionInfo> = instructions.iter().collect();
+    let Some(enum_path) = external_instruction else {
+        return Ok(in_source_order);
+    };
+    let Some(variants) =
+        spel_framework_core::idl_gen::external_enum_variants(enum_path, local_items, dep_dirs)
+    else {
+        return Ok(in_source_order);
+    };
+    spel_framework_core::idl_gen::order_by_enum_variants(
+        in_source_order,
+        |ix| ix.fn_name.to_string(),
+        &variants,
+        enum_path,
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))
+}
+
 // ─── IDL generation (code-based, for __program_idl()) ────────────────────
 
 /// Compute SHA256("global:{name}")[..8] discriminator at macro expansion time.
@@ -1641,7 +1679,7 @@ fn compute_discriminator(name: &str) -> Vec<u8> {
 
 fn generate_idl_fn(
     mod_name: &Ident,
-    instructions: &[InstructionInfo],
+    instructions: &[&InstructionInfo],
     external_instruction: Option<&str>,
     accounts: Vec<spel_framework_core::idl::IdlAccountType>,
     types: Vec<spel_framework_core::idl::IdlTypeDef>,
@@ -1823,7 +1861,7 @@ fn generate_idl_fn(
 
 fn generate_idl_json(
     mod_name: &Ident,
-    instructions: &[InstructionInfo],
+    instructions: &[&InstructionInfo],
     external_instruction: Option<&str>,
     accounts: Vec<spel_framework_core::idl::IdlAccountType>,
     types: Vec<spel_framework_core::idl::IdlTypeDef>,
@@ -2095,6 +2133,13 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let mut all_items: Vec<syn::Item> = file.items.clone();
     all_items.extend(items.clone());
 
+    let idl_instructions = idl_instruction_order(
+        &instructions,
+        external_instruction_str.as_deref(),
+        &all_items,
+        &deps.graph.transitive_dirs,
+    )?;
+
     // Also scan path-dependency crates for #[account_type] types.
     // This handles the common project structure where account types are defined
     // in a shared core crate (e.g. my_program_core) and the program binary
@@ -2111,7 +2156,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // Generate the IDL JSON
     let idl_json = generate_idl_json(
         mod_name,
-        &instructions,
+        &idl_instructions,
         external_instruction_str.as_deref(),
         accounts,
         types,
@@ -2361,6 +2406,55 @@ pub mod token {
             output.contains("TokenDefinition"),
             "TokenDefinition from path dep not found in generated IDL. Output: {output}"
         );
+    }
+
+    /// With an external enum from a path dependency, the IDL lists instructions
+    /// in its variant order (the Borsh tag order), not in source order.
+    #[test]
+    fn generate_idl_orders_instructions_by_external_enum() {
+        let tmp = TempDir::new("generate-idl-external-enum");
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"vault_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            "pub enum Instruction { OpenVault, SealVault { amount: u128 }, ZapVault }\n",
+        );
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"vault-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nvault_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/vault.rs",
+            r#"
+#[lez_program(instruction = "vault_core::Instruction")]
+pub mod vault {
+    #[instruction]
+    pub fn zap_vault(vault: AccountWithMetadata) -> SpelResult { todo!() }
+    #[instruction]
+    pub fn open_vault(vault: AccountWithMetadata) -> SpelResult { todo!() }
+    #[instruction]
+    pub fn seal_vault(vault: AccountWithMetadata, amount: u128) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        let output = expand_generate_idl(
+            program.to_str().unwrap(),
+            &syn::LitStr::new("test", proc_macro2::Span::call_site()),
+        )
+        .unwrap()
+        .to_string();
+
+        let position = |name: &str| {
+            output
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} missing from IDL: {output}"))
+        };
+        assert!(position("open_vault") < position("seal_vault"));
+        assert!(position("seal_vault") < position("zap_vault"));
     }
 
     /// Account types using the fully-qualified #[spel_framework_macros::account_type]
