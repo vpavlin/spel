@@ -25,6 +25,16 @@ use wallet::{WalletCore, DEFAULT_GAS_LIMIT, DEFAULT_MAX_FEE};
 
 /// Format PDA seeds into a display string for human-readable output.
 /// E.g. `[program_id, "owner", Account(vault)]`
+/// The Borsh variant tag for `name`: its position in the IDL. An unknown name
+/// is an error rather than silently becoming tag 0.
+fn instruction_index(idl: &SpelIdl, name: &str) -> Result<u32, String> {
+    idl.instructions
+        .iter()
+        .position(|i| i.name == name)
+        .and_then(|p| u32::try_from(p).ok())
+        .ok_or_else(|| format!("Instruction '{name}' is not in the IDL"))
+}
+
 fn format_pda_seeds(seeds: &[IdlSeed]) -> String {
     let parts: Vec<String> = std::iter::once("program_id".to_string())
         .chain(seeds.iter().map(|s| match s {
@@ -197,13 +207,12 @@ pub async fn execute_instruction(
     }
 
     // Build risc0 serialized data
-    let ix_index = idl
-        .instructions
-        .iter()
-        .position(|i| i.name == ix.name)
-        .unwrap_or(0);
+    let ix_index = instruction_index(idl, &ix.name).unwrap_or_else(|e| {
+        eprintln!("❌ {}", e);
+        process::exit(1);
+    });
     let borsh_args: Vec<_> = parsed_args.iter().map(|(_, ty, val)| (*ty, val)).collect();
-    let instruction_data = serialize_to_borsh(ix_index as u32, &borsh_args).unwrap_or_else(|e| {
+    let instruction_data = serialize_to_borsh(ix_index, &borsh_args).unwrap_or_else(|e| {
         eprintln!("❌ Serialization error: {}", e);
         process::exit(1);
     });
@@ -1010,4 +1019,34 @@ fn render_dry_run_text(s: &DryRunSummary<'_>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod instruction_index_tests {
+    use super::*;
+
+    fn idl(names: &[&str]) -> SpelIdl {
+        let instructions: Vec<_> = names
+            .iter()
+            .map(|n| serde_json::json!({ "name": n, "accounts": [], "args": [] }))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "version": "0.1.0",
+            "name": "p",
+            "instructions": instructions,
+        }))
+        .expect("IDL deserializes")
+    }
+
+    #[test]
+    fn index_is_the_idl_position() {
+        let idl = idl(&["a", "b", "c"]);
+        assert_eq!(instruction_index(&idl, "c"), Ok(2));
+    }
+
+    #[test]
+    fn unknown_instruction_is_an_error_not_tag_zero() {
+        let idl = idl(&["a", "b"]);
+        assert!(instruction_index(&idl, "missing").is_err());
+    }
 }

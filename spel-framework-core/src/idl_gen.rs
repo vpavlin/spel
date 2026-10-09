@@ -275,6 +275,12 @@ fn generate_idl_inner(
     if let Some(enum_path) = external_instruction.as_deref() {
         let mut local_items = file.items.clone();
         local_items.extend(items.iter().cloned());
+        if external_enum_uses_discriminants(enum_path, &local_items, dep_source_dirs) {
+            return Err(IdlGenError::InstructionEnumMismatch(format!(
+                "`{enum_path}` uses `#[borsh(use_discriminant = true)]`; its wire tags are the \
+                 explicit discriminants, which the IDL position cannot encode"
+            )));
+        }
         match external_enum_variants(enum_path, &local_items, dep_source_dirs) {
             Some(variants) => {
                 instructions = order_by_enum_variants(
@@ -380,6 +386,43 @@ pub fn external_enum_variants(
     local_items: &[syn::Item],
     dep_source_dirs: &[PathBuf],
 ) -> Option<Vec<String>> {
+    let item_enum = find_external_enum(enum_path, local_items, dep_source_dirs)?;
+    Some(
+        item_enum
+            .variants
+            .iter()
+            .map(|v| v.ident.to_string())
+            .collect(),
+    )
+}
+
+/// Whether the external enum at `enum_path` opts in to Borsh explicit
+/// discriminants (`#[borsh(use_discriminant = true)]`). Its tags are then the
+/// discriminant values, not the declaration indices the IDL position encodes.
+pub fn external_enum_uses_discriminants(
+    enum_path: &str,
+    local_items: &[syn::Item],
+    dep_source_dirs: &[PathBuf],
+) -> bool {
+    find_external_enum(enum_path, local_items, dep_source_dirs).is_some_and(|e| {
+        let mut on = false;
+        for attr in e.attrs.iter().filter(|a| a.path().is_ident("borsh")) {
+            drop(attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("use_discriminant") {
+                    on = meta.value()?.parse::<syn::LitBool>()?.value;
+                }
+                Ok(())
+            }));
+        }
+        on
+    })
+}
+
+fn find_external_enum(
+    enum_path: &str,
+    local_items: &[syn::Item],
+    dep_source_dirs: &[PathBuf],
+) -> Option<syn::ItemEnum> {
     let path: syn::Path = syn::parse_str(enum_path).ok()?;
     let enum_name = path.segments.last()?.ident.to_string();
     let first = path.segments.first()?.ident.to_string();
@@ -396,14 +439,7 @@ pub fn external_enum_variants(
         &dep_items
     };
 
-    let item_enum = find_enum(items, &enum_name)?;
-    Some(
-        item_enum
-            .variants
-            .iter()
-            .map(|v| v.ident.to_string())
-            .collect(),
-    )
+    find_enum(items, &enum_name).cloned()
 }
 
 /// The crate name (`-` normalized to `_`) declared in `dir/Cargo.toml`.
@@ -1415,6 +1451,40 @@ pub struct Hidden { pub x: u8 }
             }
         "#;
         assert!(matches!(err(src), IdlGenError::InstructionEnumMismatch(_)));
+    }
+
+    #[test]
+    fn external_enum_with_borsh_discriminants_is_an_error() {
+        let src = r#"
+            #[borsh(use_discriminant = true)]
+            pub enum Instruction { First, Second = 5 }
+
+            #[lez_program(instruction = "Instruction")]
+            pub mod my_program {
+                #[instruction]
+                pub fn first(account: AccountWithMetadata) {}
+                #[instruction]
+                pub fn second(account: AccountWithMetadata) {}
+            }
+        "#;
+        assert!(matches!(err(src), IdlGenError::InstructionEnumMismatch(_)));
+    }
+
+    #[test]
+    fn external_enum_with_discriminants_off_keeps_declaration_order() {
+        let src = r#"
+            #[borsh(use_discriminant = false)]
+            pub enum Instruction { First, Second = 5 }
+
+            #[lez_program(instruction = "Instruction")]
+            pub mod my_program {
+                #[instruction]
+                pub fn second(account: AccountWithMetadata) {}
+                #[instruction]
+                pub fn first(account: AccountWithMetadata) {}
+            }
+        "#;
+        assert_eq!(instruction_names(&ok(src)), ["first", "second"]);
     }
 
     // ── Account constraints ───────────────────────────────────────────────────

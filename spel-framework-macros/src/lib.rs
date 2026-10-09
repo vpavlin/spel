@@ -1653,9 +1653,27 @@ fn idl_instruction_order<'a>(
     let Some(enum_path) = external_instruction else {
         return Ok(in_source_order);
     };
+    if spel_framework_core::idl_gen::external_enum_uses_discriminants(
+        enum_path,
+        local_items,
+        dep_dirs,
+    ) {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "`{enum_path}` uses `#[borsh(use_discriminant = true)]`; its wire tags are \
+                 the explicit discriminants, which the IDL position cannot encode"
+            ),
+        ));
+    }
     let Some(variants) =
         spel_framework_core::idl_gen::external_enum_variants(enum_path, local_items, dep_dirs)
     else {
+        eprintln!(
+            "warning: `{enum_path}` not found in the program source or its local \
+             dependencies; the embedded IDL keeps source order, which matches the wire \
+             tags only if it matches the enum's variant order"
+        );
         return Ok(in_source_order);
     };
     spel_framework_core::idl_gen::order_by_enum_variants(
