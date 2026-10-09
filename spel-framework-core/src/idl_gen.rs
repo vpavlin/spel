@@ -31,6 +31,7 @@ pub enum IdlGenError {
     NoInstructions(String),
     MalformedExtensionMetadata(String),
     DuplicateInstruction(String),
+    InstructionTag(String),
 }
 
 impl fmt::Display for IdlGenError {
@@ -49,6 +50,9 @@ impl fmt::Display for IdlGenError {
             },
             IdlGenError::DuplicateInstruction(e) => {
                 write!(f, "Duplicate instruction: '{e}'")
+            },
+            IdlGenError::InstructionTag(e) => {
+                write!(f, "Cannot resolve instruction tags: {e}")
             },
         }
     }
@@ -262,10 +266,24 @@ fn generate_idl_inner(
             ext
         });
 
+    // The tag is the variant index the guest decodes (declaration order of
+    // the Instruction enum), which source order of the guest functions does
+    // not determine. Record it so clients never have to infer it.
+    let mut all_items: Vec<syn::Item> = file.items.clone();
+    all_items.extend(items.clone());
+    all_items.extend_from_slice(extra_items);
+    let tags = resolve_instruction_tags(
+        &instructions,
+        external_instruction.as_deref(),
+        &all_items,
+        &path_str,
+    )?;
+
     // Build the SpelIdl struct
     let idl_instructions: Vec<IdlInstruction> = instructions
         .iter()
-        .map(|ix| {
+        .zip(tags)
+        .map(|(ix, tag)| {
             let accounts: Vec<IdlAccountItem> = ix
                 .accounts
                 .iter()
@@ -318,13 +336,11 @@ fn generate_idl_inner(
                 discriminator: None,
                 execution: None,
                 variant: None,
+                tag,
             }
         })
         .collect();
 
-    let mut all_items: Vec<syn::Item> = file.items.clone();
-    all_items.extend(items.clone());
-    all_items.extend_from_slice(extra_items);
     let (accounts, types) = collect_account_types(&all_items);
 
     Ok(SpelIdl {
@@ -338,6 +354,106 @@ fn generate_idl_inner(
         metadata: None,
         instruction_type: external_instruction,
     })
+}
+
+/// Variant name the dispatch macro derives from an instruction function.
+fn variant_name_of(fn_name: &Ident) -> String {
+    fn_name
+        .to_string()
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect()
+}
+
+/// Collect the variant names of every enum called `name`, recursing into
+/// inline modules.
+fn find_enums_named(items: &[syn::Item], name: &str, out: &mut Vec<Vec<String>>) {
+    for item in items {
+        match item {
+            syn::Item::Enum(e) if e.ident == name => {
+                out.push(e.variants.iter().map(|v| v.ident.to_string()).collect());
+            },
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    find_enums_named(inner, name, out);
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+/// The wire tag of each instruction, in `instructions` order.
+///
+/// Serde (and so the guest) numbers enum variants by declaration index,
+/// ignoring explicit discriminants. For the generated enum that is the
+/// instruction order itself. For an external enum, read its declaration
+/// order from source. When its source is not among `items` the tags stay
+/// unrecorded (`None`) and the IDL warns, rather than guessing.
+fn resolve_instruction_tags(
+    instructions: &[InstructionInfo],
+    external_instruction: Option<&str>,
+    items: &[syn::Item],
+    source_label: &str,
+) -> Result<Vec<Option<u32>>, IdlGenError> {
+    let Some(path) = external_instruction else {
+        return Ok((0..instructions.len() as u32).map(Some).collect());
+    };
+    let enum_name = path.rsplit("::").next().unwrap_or(path).trim();
+    let mut candidates = Vec::new();
+    find_enums_named(items, enum_name, &mut candidates);
+    if candidates.is_empty() {
+        eprintln!(
+            "⚠️  Source of instruction enum '{path}' not found while generating the IDL of \
+             '{source_label}': instruction tags are not recorded and clients will assume \
+             array order."
+        );
+        return Ok(vec![None; instructions.len()]);
+    }
+
+    let wanted: Vec<String> = instructions
+        .iter()
+        .map(|ix| variant_name_of(&ix.fn_name))
+        .collect();
+    let mut resolved: Vec<Vec<u32>> = Vec::new();
+    for variants in &candidates {
+        let tags: Option<Vec<u32>> = wanted
+            .iter()
+            .map(|w| variants.iter().position(|v| v == w).map(|i| i as u32))
+            .collect();
+        if let Some(tags) = tags {
+            if !resolved.contains(&tags) {
+                resolved.push(tags);
+            }
+        }
+    }
+    match resolved.len() {
+        1 => Ok(resolved[0].iter().copied().map(Some).collect()),
+        0 => {
+            let variants = &candidates[0];
+            let missing: Vec<String> = wanted
+                .iter()
+                .zip(instructions)
+                .filter(|(w, _)| !variants.contains(w))
+                .map(|(w, ix)| format!("'{}' (expects variant '{w}')", ix.fn_name))
+                .collect();
+            Err(IdlGenError::InstructionTag(format!(
+                "enum '{path}' has no variant for instruction(s) {} in '{source_label}'",
+                missing.join(", ")
+            )))
+        },
+        _ => Err(IdlGenError::InstructionTag(format!(
+            "more than one enum named '{enum_name}' fits the instructions of \
+             '{source_label}' with different variant orders; cannot tell which \
+             one '{path}' refers to"
+        ))),
+    }
 }
 
 // ─── Dependency source collection ────────────────────────────────────────
@@ -1183,6 +1299,123 @@ pub struct Hidden { pub x: u8 }
         assert_eq!(
             idl.instruction_type.as_deref(),
             Some("my_core::Instruction")
+        );
+    }
+
+    // ── Instruction tags ──────────────────────────────────────────────────────
+
+    fn tags_of(idl: &SpelIdl) -> Vec<(String, Option<u32>)> {
+        idl.instructions
+            .iter()
+            .map(|ix| (ix.name.clone(), ix.tag))
+            .collect()
+    }
+
+    #[test]
+    fn generated_enum_tags_follow_function_order() {
+        let src = r#"
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn first(acc: AccountWithMetadata) {}
+                #[instruction]
+                pub fn second(acc: AccountWithMetadata) {}
+            }
+        "#;
+        assert_eq!(
+            tags_of(&ok(src)),
+            vec![("first".into(), Some(0)), ("second".into(), Some(1))]
+        );
+    }
+
+    #[test]
+    fn external_enum_tags_follow_enum_order_not_function_order() {
+        // Guest functions are written in a different order than the enum
+        // declares its variants (issue #288). Explicit discriminants do not
+        // matter: serde numbers variants by declaration index.
+        let src = r#"
+            pub mod my_core {
+                pub enum Instruction {
+                    Mint,
+                    PrintNft { id: u8 },
+                    SetAuthority = 9,
+                    Burn,
+                }
+            }
+
+            #[lez_program(instruction = "my_core::Instruction")]
+            pub mod prog {
+                #[instruction]
+                pub fn burn(acc: AccountWithMetadata) {}
+                #[instruction]
+                pub fn set_authority(acc: AccountWithMetadata) {}
+                #[instruction]
+                pub fn mint(acc: AccountWithMetadata) {}
+                #[instruction]
+                pub fn print_nft(acc: AccountWithMetadata, id: u8) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert_eq!(
+            tags_of(&idl),
+            vec![
+                ("burn".into(), Some(3)),
+                ("set_authority".into(), Some(2)),
+                ("mint".into(), Some(0)),
+                ("print_nft".into(), Some(1)),
+            ]
+        );
+        assert_eq!(idl.instruction_tag("set_authority"), Ok(2));
+    }
+
+    #[test]
+    fn external_enum_missing_a_variant_is_an_error() {
+        let src = r#"
+            pub mod my_core {
+                pub enum Instruction { Mint }
+            }
+
+            #[lez_program(instruction = "my_core::Instruction")]
+            pub mod prog {
+                #[instruction]
+                pub fn mint(acc: AccountWithMetadata) {}
+                #[instruction]
+                pub fn burn(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let err = generate_idl_from_str(src, "test.rs").unwrap_err();
+        assert!(matches!(err, IdlGenError::InstructionTag(_)), "{err}");
+        assert!(err.to_string().contains("burn"), "{err}");
+    }
+
+    #[test]
+    fn external_enum_source_unavailable_leaves_tags_unrecorded() {
+        let src = r#"
+            #[lez_program(instruction = "far_away::Instruction")]
+            pub mod prog {
+                #[instruction]
+                pub fn mint(acc: AccountWithMetadata) {}
+            }
+        "#;
+        assert_eq!(tags_of(&ok(src)), vec![("mint".into(), None)]);
+    }
+
+    #[test]
+    fn external_enum_found_in_dependency_items() {
+        let content = r#"
+            #[lez_program(instruction = "dep_core::Instruction")]
+            pub mod prog {
+                #[instruction]
+                pub fn b_op(acc: AccountWithMetadata) {}
+                #[instruction]
+                pub fn a_op(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let dep: syn::File = syn::parse_str("pub enum Instruction { AOp, BOp }").unwrap();
+        let idl = generate_idl_inner(content, "test.rs", &dep.items, None).unwrap();
+        assert_eq!(
+            tags_of(&idl),
+            vec![("b_op".into(), Some(1)), ("a_op".into(), Some(0))]
         );
     }
 

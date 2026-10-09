@@ -262,6 +262,7 @@ fn test_pda_helpers_single_arg_seed() {
             discriminator: None,
             execution: None,
             variant: None,
+            tag: None,
         }],
         accounts: vec![],
         types: vec![],
@@ -345,6 +346,7 @@ fn test_pda_helpers_multi_seed() {
             discriminator: None,
             execution: None,
             variant: None,
+            tag: None,
         }],
         accounts: vec![],
         types: vec![],
@@ -421,6 +423,7 @@ fn test_pda_helpers_deduplication() {
         discriminator: None,
         execution: None,
         variant: None,
+        tag: None,
     };
 
     let idl = SpelIdl {
@@ -500,6 +503,7 @@ fn test_pda_helpers_u64_single_seed() {
             discriminator: None,
             execution: None,
             variant: None,
+            tag: None,
         }],
         accounts: vec![],
         types: vec![],
@@ -588,6 +592,7 @@ fn test_pda_helpers_u64_multi_seed() {
             discriminator: None,
             execution: None,
             variant: None,
+            tag: None,
         }],
         accounts: vec![],
         types: vec![],

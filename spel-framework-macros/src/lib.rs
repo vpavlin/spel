@@ -2068,8 +2068,18 @@ fn generate_idl_fn(
 
     let instruction_literals: Vec<TokenStream2> = instructions
         .iter()
-        .map(|ix| {
+        .enumerate()
+        .map(|(position, ix)| {
             let ix_name = ix.fn_name.to_string();
+            // The generated enum declares variants in this order; an external
+            // enum's order is not visible to the macro (`spel generate-idl`
+            // reads it from source).
+            let tag_expr = if external_instruction.is_some() {
+                quote! { None }
+            } else {
+                let position = position as u32;
+                quote! { Some(#position) }
+            };
 
             let account_literals: Vec<TokenStream2> = ix
                 .accounts
@@ -2194,6 +2204,7 @@ fn generate_idl_fn(
                         private_owned: false,
                     }),
                     variant: Some(#variant_name_str.to_string()),
+                    tag: #tag_expr,
                 }
             }
         })
@@ -2250,7 +2261,8 @@ fn generate_idl_json(
 
     let instructions_json: Vec<String> = instructions
         .iter()
-        .map(|ix| {
+        .enumerate()
+        .map(|(position, ix)| {
             let ix_name = &ix.fn_name.to_string();
 
             let accounts_json: Vec<String> = ix
@@ -2317,11 +2329,17 @@ fn generate_idl_json(
                 })
                 .collect();
 
+            let tag_json = if external_instruction.is_some() {
+                String::new()
+            } else {
+                format!(",\"tag\":{position}")
+            };
             format!(
-                "{{\"name\":\"{}\",\"accounts\":[{}],\"args\":[{}]}}",
+                "{{\"name\":\"{}\",\"accounts\":[{}],\"args\":[{}]{}}}",
                 ix_name,
                 accounts_json.join(","),
-                args_json.join(",")
+                args_json.join(","),
+                tag_json
             )
         })
         .collect();

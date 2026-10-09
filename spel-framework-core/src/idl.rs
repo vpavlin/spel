@@ -38,6 +38,27 @@ pub struct SpelIdl {
     pub instruction_type: Option<String>,
 }
 
+impl SpelIdl {
+    /// Resolve the wire tag for the named instruction.
+    ///
+    /// Uses the recorded [`IdlInstruction::tag`] when present, and falls back
+    /// to the instruction's position in the array for IDLs that predate the
+    /// field. An unknown name is an error, never a silent tag 0.
+    pub fn instruction_tag(&self, name: &str) -> Result<u32, String> {
+        let (position, ix) = self
+            .instructions
+            .iter()
+            .enumerate()
+            .find(|(_, ix)| ix.name == name)
+            .ok_or_else(|| format!("instruction '{name}' is not in the IDL"))?;
+        match ix.tag {
+            Some(tag) => Ok(tag),
+            None => u32::try_from(position)
+                .map_err(|_| format!("instruction '{name}' position exceeds u32")),
+        }
+    }
+}
+
 /// Program metadata (lssa-lang compat).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdlMetadata {
@@ -71,6 +92,16 @@ pub struct IdlInstruction {
     /// Variant name in PascalCase (lssa-lang compat).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// The instruction enum's variant index: the tag the guest decodes.
+    ///
+    /// This is a wire-format fact, not an ordering convention. The guest
+    /// decodes the leading tag from the declaration order of its
+    /// `Instruction` enum, which need not match the order of `instructions`
+    /// in this IDL. Absent in IDLs generated before this field existed;
+    /// consumers then fall back to the array position (see
+    /// [`SpelIdl::instruction_tag`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u32>,
 }
 
 /// An account expected by an instruction.
@@ -221,5 +252,61 @@ impl SpelIdl {
     /// Serialize the IDL to pretty-printed JSON.
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn idl_from(instructions: serde_json::Value) -> SpelIdl {
+        serde_json::from_value(serde_json::json!({
+            "version": "0.1.0",
+            "name": "p",
+            "instructions": instructions,
+        }))
+        .expect("IDL deserializes")
+    }
+
+    #[test]
+    fn old_idl_without_tag_falls_back_to_position() {
+        let idl = idl_from(serde_json::json!([
+            { "name": "a", "accounts": [], "args": [] },
+            { "name": "b", "accounts": [], "args": [] },
+        ]));
+        assert_eq!(idl.instruction_tag("a"), Ok(0));
+        assert_eq!(idl.instruction_tag("b"), Ok(1));
+    }
+
+    #[test]
+    fn recorded_tag_wins_over_position() {
+        let idl = idl_from(serde_json::json!([
+            { "name": "a", "accounts": [], "args": [], "tag": 5 },
+            { "name": "b", "accounts": [], "args": [], "tag": 2 },
+        ]));
+        assert_eq!(idl.instruction_tag("a"), Ok(5));
+        assert_eq!(idl.instruction_tag("b"), Ok(2));
+    }
+
+    #[test]
+    fn unknown_instruction_is_an_error() {
+        let idl = idl_from(serde_json::json!([
+            { "name": "a", "accounts": [], "args": [] },
+        ]));
+        assert!(idl.instruction_tag("missing").is_err());
+    }
+
+    #[test]
+    fn tag_round_trips_and_is_omitted_when_absent() {
+        let idl = idl_from(serde_json::json!([
+            { "name": "a", "accounts": [], "args": [], "tag": 7 },
+            { "name": "b", "accounts": [], "args": [] },
+        ]));
+        let json = serde_json::to_value(&idl).unwrap();
+        assert_eq!(json["instructions"][0]["tag"], 7);
+        assert!(json["instructions"][1].get("tag").is_none());
+        let back: SpelIdl = serde_json::from_value(json).unwrap();
+        assert_eq!(back.instructions[0].tag, Some(7));
+        assert_eq!(back.instructions[1].tag, None);
     }
 }

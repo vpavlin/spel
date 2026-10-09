@@ -60,6 +60,7 @@ Each instruction object:
 | `accounts` | `array` | Yes | Accounts expected by this instruction (in order). |
 | `args` | `array` | Yes | Instruction arguments. |
 | `discriminator` | `array<u8>` | No | SHA-256("global:{name}")[..8] — 8-byte discriminator (lssa-lang compat). |
+| `tag` | `u32` | No | The instruction enum's variant index: the tag the guest decodes, i.e. the declaration order of the `Instruction` enum (explicit discriminants are ignored; serde numbers variants by declaration index). For an external `instruction = "..."` enum `spel generate-idl` reads it from the enum's source, so it can differ from the position in `instructions`. Clients use it in preference to the array position; IDLs without it fall back to position. |
 | `execution` | `object` | No | `{ "public": bool, "private_owned": bool }` — execution mode (lssa-lang compat). Defaults to public. |
 | `variant` | `string` | No | PascalCase variant name in the `Instruction` enum (lssa-lang compat). |
 

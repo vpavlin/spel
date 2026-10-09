@@ -197,13 +197,20 @@ pub async fn execute_instruction(
     }
 
     // Build risc0 serialized data
-    let ix_index = idl
-        .instructions
-        .iter()
-        .position(|i| i.name == ix.name)
-        .unwrap_or(0);
+    let ix_index = idl.instruction_tag(&ix.name).unwrap_or_else(|e| {
+        eprintln!("❌ {}", e);
+        process::exit(1);
+    });
+    if idl.instruction_type.is_some() && ix.tag.is_none() {
+        eprintln!(
+            "⚠️  IDL does not record instruction tags for the external enum '{}'; \
+             assuming IDL order. Regenerate the IDL with `spel generate-idl` if the \
+             program's enum order differs.",
+            idl.instruction_type.as_deref().unwrap_or_default()
+        );
+    }
     let risc0_args: Vec<_> = parsed_args.iter().map(|(_, ty, val)| (*ty, val)).collect();
-    let instruction_data = serialize_to_risc0(ix_index as u32, &risc0_args).unwrap_or_else(|e| {
+    let instruction_data = serialize_to_risc0(ix_index, &risc0_args).unwrap_or_else(|e| {
         eprintln!("❌ Serialization error: {}", e);
         process::exit(1);
     });
