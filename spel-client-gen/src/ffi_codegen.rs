@@ -57,7 +57,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "use std::ffi::{{CStr, CString}};").unwrap();
     writeln!(out, "use std::os::raw::c_char;").unwrap();
     writeln!(out, "use serde_json::{{Value, json}};").unwrap();
-    writeln!(out, "use nssa::{{AccountId, PublicTransaction}};").unwrap();
+    writeln!(out, "use nssa::{{AccountId, PublicTransaction, FeeDeclaration}};").unwrap();
     writeln!(
         out,
         "use nssa::public_transaction::{{Message, WitnessSet}};"
@@ -524,7 +524,14 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         writeln!(out, "            .collect();").unwrap();
         writeln!(
         out,
-        "        let message = Message::try_new(program_id, shard_selectors, nonces, instruction)"
+        "        let fee_payer = *signer_ids.first().ok_or_else(|| \"a fee payer (at least one signer) is required\".to_string())?;"
+        )
+        .unwrap();
+        writeln!(out, "        let gas_limit: u64 = 10_000_000;").unwrap();
+        writeln!(out, "        let max_fee: u128 = (u128::from(gas_limit) + 100_000) * 64;").unwrap();
+        writeln!(
+        out,
+        "        let message = Message::try_new_with_fees(program_id, shard_selectors, nonces, instruction, FeeDeclaration::new(fee_payer, gas_limit, 0, max_fee))"
         )
         .unwrap();
         writeln!(

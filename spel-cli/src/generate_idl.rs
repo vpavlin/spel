@@ -277,8 +277,8 @@ mod tests {
             pub mod token {
                 #[instruction]
                 pub fn transfer(
-                    #[account(signer)] sender: AccountWithMetadata,
-                    recipient: AccountWithMetadata,
+                    #[account(signer)] sender: AccountMeta,
+                    recipient: AccountMeta,
                     amount: u64,
                 ) -> SpelResult { todo!() }
             }
@@ -311,9 +311,9 @@ mod tests {
                 #[instruction]
                 pub fn increment(
                     #[account(mut, pda = literal("count"))]
-                    state: AccountWithMetadata,
+                    state: AccountMeta,
                     #[account(signer)]
-                    owner: AccountWithMetadata,
+                    owner: AccountMeta,
                 ) -> SpelResult { todo!() }
             }
             "#,

@@ -184,7 +184,7 @@ fn test_ffi_calls_client_methods() {
 
     // The FFI impl builds instruction enum and submits transaction inline
     let ffi = &output.ffi_code;
-    assert!(ffi.contains("Message::try_new"), "FFI should build Message");
+    assert!(ffi.contains("Message::try_new_with_fees"), "FFI should build Message with fees");
     assert!(
         ffi.contains("send_transaction"),
         "FFI should submit transaction"
