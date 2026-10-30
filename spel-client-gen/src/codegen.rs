@@ -238,11 +238,13 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out, "            .collect();").unwrap();
         // LEZ v0.3 rejects fee-less user public transactions at ingest, so every tx must
         // declare a fee and a payer. The payer is the first signer (already authorized by its
-        // witness signature). gas_limit defaults high because a RISC Zero guest costs millions
-        // of cycles; max_fee mirrors the wallet/CLI default (gas+100k at 8x the min base fee).
+        // witness signature). gas_limit is ON-CHAIN execution gas (gas_used, ~1e5) — NOT the RISC Zero
+        // proving cycle count (that is off-chain, borne by the sequencer). The sequencer reserves
+        // gas_limit*base_fee_exec up front, so an inflated gas_limit requires a large payer balance and
+        // is rejected as "Incorrect fee" when the reserve exceeds it. Default modest; override SPEL_GAS_LIMIT.
         // Unused reserve is refunded; the real charge is gas_used * base_fee.
         writeln!(out, "        let fee_payer = *signer_ids.first().ok_or_else(|| \"a fee payer (at least one signer) is required\".to_string())?;").unwrap();
-        writeln!(out, "        let gas_limit: u64 = 10_000_000;").unwrap();
+        writeln!(out, "        let gas_limit: u64 = std::env::var(\"SPEL_GAS_LIMIT\").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(500_000);").unwrap();
         writeln!(out, "        let max_fee: u128 = (u128::from(gas_limit) + 100_000) * 64;").unwrap();
         writeln!(out, "        let message = Message::try_new_with_fees(self.program_id, shard_selectors, nonces, instruction, FeeDeclaration::new(fee_payer, gas_limit, 0, max_fee))").unwrap();
         writeln!(

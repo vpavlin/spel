@@ -292,11 +292,11 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         "    std::env::set_var(\"NSSA_SEQUENCER_URL\", sequencer_url);"
     )
     .unwrap();
-    writeln!(
-        out,
-        "    get_runtime().block_on(WalletCore::from_env()).map_err(|e| format!(\"wallet init: {{}}\", e))"
-    )
-    .unwrap();
+    writeln!(out, "    get_runtime().block_on(async {{").unwrap();
+    writeln!(out, "        tokio::time::timeout(std::time::Duration::from_secs(25), WalletCore::from_env()).await").unwrap();
+    writeln!(out, "            .map_err(|_| \"wallet init: timed out (sequencer unreachable?)\".to_string())?").unwrap();
+    writeln!(out, "            .map_err(|e| format!(\"wallet init: {{}}\", e))").unwrap();
+    writeln!(out, "    }})").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -493,16 +493,9 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         // Submit via the shared runtime
         writeln!(out, "    let rt = get_runtime();").unwrap();
         writeln!(out, "    let tx_hash = rt.block_on(async {{").unwrap();
-        writeln!(
-            out,
-            "        let nonces = wallet.get_accounts_nonces(&signer_ids).await"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "            .map_err(|e| format!(\"nonces: {{}}\", e))?;"
-        )
-        .unwrap();
+        writeln!(out, "        let nonces = tokio::time::timeout(std::time::Duration::from_secs(25), wallet.get_accounts_nonces(&signer_ids)).await").unwrap();
+        writeln!(out, "            .map_err(|_| \"nonces: timed out (sequencer unreachable?)\".to_string())?").unwrap();
+        writeln!(out, "            .map_err(|e| format!(\"nonces: {{}}\", e))?;").unwrap();
         writeln!(out, "        let mut signing_keys = Vec::new();").unwrap();
         writeln!(out, "        for sid in &signer_ids {{").unwrap();
         writeln!(out, "            let key = wallet").unwrap();
@@ -527,7 +520,14 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         "        let fee_payer = *signer_ids.first().ok_or_else(|| \"a fee payer (at least one signer) is required\".to_string())?;"
         )
         .unwrap();
-        writeln!(out, "        let gas_limit: u64 = 10_000_000;").unwrap();
+        // gas_limit is ON-CHAIN execution gas (gas_used, ~1e5 for typical instructions), NOT the RISC Zero
+        // proving cycle count (that is off-chain and borne by the sequencer). The sequencer reserves
+        // gas_limit*base_fee_exec up front, so an inflated gas_limit silently requires a large payer balance
+        // and is rejected as "Incorrect fee" when the reserve exceeds the balance. Default to a modest value;
+        // heavier programs can raise it via SPEL_FFI_GAS_LIMIT.
+        writeln!(out, "        // gas_limit = on-chain execution gas (not RISC Zero proving cycles); the sequencer reserves").unwrap();
+        writeln!(out, "        // gas_limit*base_fee up front, so keep it near real usage. Override with SPEL_FFI_GAS_LIMIT.").unwrap();
+        writeln!(out, "        let gas_limit: u64 = std::env::var(\"SPEL_FFI_GAS_LIMIT\").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(500_000);").unwrap();
         writeln!(out, "        let max_fee: u128 = (u128::from(gas_limit) + 100_000) * 64;").unwrap();
         writeln!(
         out,
@@ -549,19 +549,17 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
             "        let tx = PublicTransaction::new(message, witness_set);"
         )
         .unwrap();
-        writeln!(out, "        let raw = wallet.helm_owned().send_transaction(common::transaction::LeeTransaction::Public(tx)).await").unwrap();
-        writeln!(
-            out,
-            "            .map_err(|e| format!(\"submit: {{}}\", e))?;"
-        )
-        .unwrap();
+        writeln!(out, "        let raw = tokio::time::timeout(std::time::Duration::from_secs(30), wallet.helm_owned().send_transaction(common::transaction::LeeTransaction::Public(tx))).await").unwrap();
+        writeln!(out, "            .map_err(|_| \"submit: timed out (sequencer unreachable?)\".to_string())?").unwrap();
+        writeln!(out, "            .map_err(|e| format!(\"submit: {{}}\", e))?;").unwrap();
         writeln!(out, "        let tx_hash_hex = hex::encode(raw.0);").unwrap();
         writeln!(out, "        let poller = wallet.poller_helm();").unwrap();
-        writeln!(
-            out,
-            "        poller.poll_tx(raw).await.map_err(|e| format!(\"confirm: {{}}\", e))?;"
-        )
-        .unwrap();
+        writeln!(out, "        // confirm (inclusion) is bounded so an unreachable sequencer errors instead of hanging;").unwrap();
+        writeln!(out, "        // 300s tolerates slow real-proof confirmation. Override with SPEL_FFI_CONFIRM_SECS.").unwrap();
+        writeln!(out, "        let confirm_secs: u64 = std::env::var(\"SPEL_FFI_CONFIRM_SECS\").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(300);").unwrap();
+        writeln!(out, "        tokio::time::timeout(std::time::Duration::from_secs(confirm_secs), poller.poll_tx(raw)).await").unwrap();
+        writeln!(out, "            .map_err(|_| format!(\"confirm: timed out, tx {{}} not confirmed in time\", tx_hash_hex))?").unwrap();
+        writeln!(out, "            .map_err(|e| format!(\"confirm: {{}}\", e))?;").unwrap();
         writeln!(out, "        Ok::<String, String>(tx_hash_hex)").unwrap();
         writeln!(out, "    }})?;").unwrap();
         writeln!(out).unwrap();
